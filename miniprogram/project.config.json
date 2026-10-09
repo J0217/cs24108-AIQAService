@@ -1,0 +1,76 @@
+{
+  "description": "AI智能问答客服平台",
+  "packOptions": {
+    "ignore": [],
+    "include": []
+  },
+  "setting": {
+    "urlCheck": true,
+    "es6": true,
+    "enhance": true,
+    "postcss": true,
+    "preloadBackgroundData": false,
+    "minified": true,
+    "newFeature": false,
+    "coverView": true,
+    "nodeModules": false,
+    "autoAudits": false,
+    "showShadowRootInWxmlPanel": true,
+    "scopeDataCheck": false,
+    "uglifyFileName": false,
+    "checkInvalidKey": true,
+    "checkSiteMap": true,
+    "uploadWithSourceMap": true,
+    "compileHotReLoad": false,
+    "lazyloadPlaceholderEnable": false,
+    "useMultiFrameRuntime": true,
+    "useApiHook": true,
+    "useApiHostProcess": true,
+    "babelSetting": {
+      "ignore": [],
+      "disablePlugins": [],
+      "outputPath": ""
+    },
+    "enableEngineNative": false,
+    "useIsolateContext": true,
+    "userConfirmedBundleSwitch": false,
+    "packNpmManually": false,
+    "packNpmRelationList": [],
+    "minifyWXSS": true,
+    "showES6CompileOption": false,
+    "minifyWXML": true,
+    "ignoreUploadUnusedFiles": true,
+    "compileWorklet": false,
+    "isUsageLimitEnabled": false,
+    "babelCompileRate": 0,
+    "settingBabelCompileRate": 0,
+    "installPlugin": {
+      "disable": false,
+      "localPlugins": false,
+      "idList": []
+    },
+    "reportToLogid": false,
+    "userConfirmedReportToLogidSwitch": false
+  },
+  "compileType": "miniprogram",
+  "libVersion": "3.3.4",
+  "appid": "touristappid",
+  "projectname": "ai-qa-service",
+  "condition": {},
+  "editorSetting": {
+    "tabIndent": "insertSpaces",
+    "tabSize": 2
+  },
+  "miniprogramRoot": "./",
+  "esbuild": {
+    "minify": false,
+    "external": [],
+    "ignoreDefineCookie": false,
+    "skipExternalNetworkErrors": false,
+    "sourcemap": false
+  },
+  "staticServerOptions": {
+    "baseURL": "",
+    "servePathMap": {}
+  }
+}

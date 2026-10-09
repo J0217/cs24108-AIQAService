@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+venv/
+.venv/
+
+# Environment variables
+.env
+
+# Database
+backend/instance/*.db
+*.sqlite3
+
+# Uploads
+uploads/*
+
+# IDE / Editor
+.claude/
+.idea/
+.vscode/
+
+# WeChat MiniProgram
+miniprogram/project.private.config.json
+
+# OS
+Thumbs.db
+.DS_Store

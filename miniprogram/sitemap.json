@@ -1,0 +1,10 @@
+{
+  "desc": "关于本文件的更多信息，请参考文档",
+  "rules": [
+    {
+      "trigger": "warning",
+      "action": "ignore",
+      "level": "api-not-found"
+    }
+  ]
+}
