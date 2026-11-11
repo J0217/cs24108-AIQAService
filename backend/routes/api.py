@@ -4,8 +4,6 @@
 """
 from flask import Blueprint, request, current_app
 from datetime import datetime, timezone
-import hashlib
-import time
 import uuid
 
 from ..models import db, User, Conversation, Message, Announcement, QuickReply
@@ -21,6 +19,25 @@ def utcnow():
     return datetime.now(timezone.utc)
 
 
+def validate_api_key() -> bool:
+    """校验外部调用方传入的 X-API-Key"""
+    api_key = (request.headers.get('X-API-Key') or '').strip()
+    allowed = [k.strip() for k in str(current_app.config.get('API_KEYS', '')).split(',') if k.strip()]
+    return bool(api_key) and api_key in allowed
+
+
+@bp.before_request
+def require_api_key():
+    """统一API下的所有 /v1 接口都必须携带有效的 X-API-Key"""
+    if not request.path.startswith('/api/v1/'):
+        return None
+    if not request.headers.get('X-API-Key'):
+        return error_response('缺少API Key', 401)
+    if not validate_api_key():
+        return error_response('API Key 无效', 401)
+    return None
+
+
 @bp.route('/v1/chat', methods=['POST'])
 def api_chat():
     """
@@ -28,24 +45,20 @@ def api_chat():
     请求头: X-API-Key: xxx
     请求体: { "question": "用户问题", "session_id": "会话标识（可选）", "scene_type": "场景类型（可选）" }
     """
-    api_key = request.headers.get('X-API-Key')
-    if not api_key:
-        return error_response('缺少API Key', 401)
-
-    # TODO: 实际应验证API Key
-    user = User.get_or_none(User.username == 'api_user')  # 简化处理
+    user = User.get_or_none(User.username == 'api_user')  # 统一API接入账号
     if not user:
         user = User.create(username='api_user', nickname='API用户', role='user', status=1)
 
-    data = request.get_json()
-    if not data or not data.get('question'):
+    data = request.get_json() or {}
+    question = (data.get('question') or '').strip()
+    if not question:
         return error_response('问题内容不能为空', 400)
-
-    question = data['question'].strip()
     session_id = data.get('session_id', f"api_{uuid.uuid4().hex[:12]}")
     scene_type = data.get('scene_type', 'general')
 
-    conversation = Conversation.get_or_none(Conversation.session_id == session_id)
+    conversation = Conversation.get_or_none(
+        (Conversation.session_id == session_id) & (Conversation.user_id == user.id)
+    )
     if not conversation:
         conversation = Conversation.create(
             user_id=user.id,
@@ -54,6 +67,9 @@ def api_chat():
             scene_type=scene_type,
             status=1
         )
+    elif conversation.scene_type != scene_type:
+        conversation.scene_type = scene_type
+        conversation.save()
 
     # 记录用户消息
     user_message = Message.create(
@@ -72,10 +88,12 @@ def api_chat():
 
     # 调用AI生成回复
     ai_service = AIService()
-    ai_response, confidence, response_time = ai_service.generate_reply(
+    ai_response, confidence, response_time, is_quick_reply = ai_service.generate_reply(
         content=question,
         history=history,
-        scene_type=scene_type
+        scene_type=scene_type,
+        max_tokens=current_app.config.get('AI_MAX_TOKENS'),
+        temperature=current_app.config.get('AI_TEMPERATURE')
     )
 
     # 记录AI回复
@@ -85,6 +103,7 @@ def api_chat():
         role='assistant',
         content=ai_response,
         confidence=confidence,
+        is_quick_reply=is_quick_reply,
         response_time=response_time
     )
 
@@ -93,6 +112,7 @@ def api_chat():
         'question': question,
         'answer': ai_response,
         'confidence': confidence,
+        'is_quick_reply': is_quick_reply,
         'response_time': response_time,
         'message_id': assistant_message.id
     }, '请求成功')

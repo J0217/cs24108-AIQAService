@@ -19,6 +19,11 @@ def utcnow():
     return datetime.now(timezone.utc)
 
 
+def _pk(value):
+    """兼容 peewee 3/4：外键字段访问可能返回关联对象或原始ID"""
+    return getattr(value, 'id', value)
+
+
 class BaseMixin(peewee.Model):
     """基础模型混入，统一时间字段"""
     created_at = peewee.DateTimeField(default=utcnow)
@@ -35,6 +40,7 @@ class User(BaseMixin):
     nickname = peewee.CharField(max_length=64, default='')
     avatar = peewee.CharField(max_length=256, default='')
     phone = peewee.CharField(max_length=20, default='')
+    password_hash = peewee.CharField(max_length=255, null=True)
     role = peewee.CharField(max_length=20, default='user')  # user/admin
     status = peewee.IntegerField(default=1)  # 1正常 0禁用
     last_login_time = peewee.DateTimeField(default=utcnow)
@@ -75,7 +81,7 @@ class Conversation(BaseMixin):
         ).count()
         return {
             'id': self.id,
-            'user_id': self.user_id,
+            'user_id': _pk(self.user_id),
             'session_id': self.session_id,
             'title': self.title,
             'scene_type': self.scene_type,
@@ -104,8 +110,8 @@ class Message(BaseMixin):
     def to_dict(self):
         return {
             'id': self.id,
-            'conversation_id': self.conversation_id,
-            'user_id': self.user_id,
+            'conversation_id': _pk(self.conversation_id),
+            'user_id': _pk(self.user_id),
             'role': self.role,
             'content': self.content,
             'message_type': self.message_type,
@@ -135,10 +141,11 @@ class Announcement(BaseMixin):
         database = db
 
     def to_dict(self):
+        creator_id = _pk(self.created_by)
         creator_name = None
-        if self.created_by:
+        if creator_id:
             try:
-                creator_name = User.get(User.id == self.created_by).nickname
+                creator_name = User.get(User.id == creator_id).nickname
             except User.DoesNotExist:
                 pass
         return {
@@ -152,7 +159,7 @@ class Announcement(BaseMixin):
             'end_time': self.end_time.isoformat() if self.end_time else None,
             'status': self.status,
             'view_count': self.view_count,
-            'created_by': self.created_by,
+            'created_by': creator_id,
             'creator_name': creator_name,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None

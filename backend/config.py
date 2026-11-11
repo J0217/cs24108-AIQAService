@@ -5,6 +5,11 @@
 import os
 from datetime import timedelta
 
+from dotenv import load_dotenv
+
+# 加载项目根目录下的 .env（不存在时忽略）
+load_dotenv(os.path.join(os.path.dirname(os.path.dirname(__file__)), '.env'))
+
 
 class BaseConfig:
     """基础配置"""
@@ -24,8 +29,12 @@ class BaseConfig:
     AI_API_KEY = os.getenv('AI_API_KEY', 'your-ai-api-key-here')
     AI_API_BASE_URL = os.getenv('AI_API_BASE_URL', 'https://api.openai.com/v1')
     AI_MODEL = os.getenv('AI_MODEL', 'gpt-3.5-turbo')
-    AI_MAX_TOKENS = 2000
-    AI_TEMPERATURE = 0.7
+    AI_MAX_TOKENS = int(os.getenv('AI_MAX_TOKENS', 2000))
+    AI_TEMPERATURE = float(os.getenv('AI_TEMPERATURE', 0.7))
+    AI_TIMEOUT = int(os.getenv('AI_TIMEOUT', 30))
+
+    # 对外开放 API 的 Key 列表（逗号分隔）
+    API_KEYS = os.getenv('API_KEYS', 'demo-api-key')
 
     # 文件上传配置
     UPLOAD_FOLDER = os.getenv('UPLOAD_FOLDER', os.path.join(os.path.dirname(os.path.dirname(__file__)), 'uploads'))

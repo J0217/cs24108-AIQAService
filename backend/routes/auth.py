@@ -2,16 +2,20 @@
 """
 认证路由 - 用户登录、注册、Token管理
 """
-from flask import Blueprint, request, jsonify, current_app
+from flask import Blueprint, request, current_app
 from datetime import datetime, timezone
 import jwt
 import uuid
-import re
+
+import requests
+from werkzeug.security import generate_password_hash, check_password_hash
 
 from ..models import db, User
 from ..utils.response import success_response, error_response
 
 bp = Blueprint('auth', __name__, url_prefix='/api/auth')
+
+WX_CODE2SESSION_URL = 'https://api.weixin.qq.com/sns/jscode2session'
 
 
 def utcnow():
@@ -39,20 +43,47 @@ def decode_token(token, secret_key):
         return None
 
 
+def _request_openid(code):
+    """调用微信 jscode2session 换取 openid；未配置 AppID 时使用开发态 mock"""
+    appid = current_app.config.get('WX_APPID', '')
+    secret = current_app.config.get('WX_SECRET', '')
+    if not appid or not secret:
+        return f"mock_openid_{uuid.uuid4().hex[:16]}"
+
+    resp = requests.get(WX_CODE2SESSION_URL, params={
+        'appid': appid, 'secret': secret,
+        'js_code': code, 'grant_type': 'authorization_code'
+    }, timeout=5)
+    result = resp.json()
+    if result.get('errcode'):
+        raise ValueError(result.get('errmsg', '微信登录失败'))
+    openid = result.get('openid')
+    if not openid:
+        raise ValueError('微信登录失败：未获取到 openid')
+    return openid
+
+
 @bp.route('/wx-login', methods=['POST'])
 def wx_login():
     """微信小程序登录"""
-    data = request.get_json()
-    if not data or not data.get('code'):
+    payload = request.get_json() or {}
+    if not payload.get('code'):
         return error_response('缺少微信登录凭证code', 400)
 
-    openid = f"mock_openid_{uuid.uuid4().hex[:16]}"
+    try:
+        openid = _request_openid(payload['code'])
+    except ValueError as e:
+        return error_response(str(e), 401)
+    except requests.RequestException:
+        return error_response('微信登录服务暂不可用，请稍后重试', 503)
 
     user = User.get_or_none(User.openid == openid)
     if not user:
+        nickname = payload.get('nickname') or f'用户{str(uuid.uuid4())[:6]}'
         user = User.create(
             openid=openid,
-            nickname=f'用户{str(uuid.uuid4())[:6]}',
+            nickname=nickname,
+            avatar=payload.get('avatar', ''),
             role='user',
             status=1
         )
@@ -60,11 +91,14 @@ def wx_login():
     if user.status != 1:
         return error_response('账号已被禁用', 403)
 
+    if payload.get('nickname'):
+        user.nickname = payload['nickname'].strip()[:64]
+    if payload.get('avatar'):
+        user.avatar = payload['avatar'].strip()[:256]
     user.last_login_time = utcnow()
     user.save()
 
     token = generate_token(user.id, current_app.config.get('JWT_SECRET_KEY'))
-
     return success_response({'token': token, 'user': user.to_dict()}, '登录成功')
 
 
@@ -82,10 +116,9 @@ def login():
         return error_response('用户名和密码不能为空', 400)
 
     user = User.get_or_none((User.username == username) & (User.status == 1))
-    if not user:
+    if not user or not user.password_hash or not check_password_hash(user.password_hash, password):
         return error_response('用户名或密码错误', 401)
 
-    # TODO: 实际应使用bcrypt验证密码
     user.last_login_time = utcnow()
     user.save()
 
@@ -120,6 +153,7 @@ def register():
         username=username,
         nickname=username,
         phone=phone,
+        password_hash=generate_password_hash(password),
         role='user',
         status=1
     )

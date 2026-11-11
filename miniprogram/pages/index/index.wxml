@@ -3,7 +3,7 @@
   <!-- 用户信息区 -->
   <view class="user-section" wx:if="{{isLoggedIn}}">
     <view class="user-info">
-      <image class="avatar" src="{{userInfo.avatar || '/static/default-avatar.png'}}" mode="aspectFill"></image>
+      <view class="avatar user-avatar">👤</view>
       <view class="user-detail">
         <text class="nickname">{{userInfo.nickname || '用户'}}</text>
         <text class="welcome">您好，欢迎使用AI智能客服</text>
@@ -18,7 +18,7 @@
   <!-- 未登录状态 -->
   <view class="login-section" wx:else>
     <view class="login-content">
-      <image class="logo" src="/static/logo.png" mode="aspectFit"></image>
+      <view class="logo logo-emoji">🤖</view>
       <text class="title">AI智能问答客服平台</text>
       <text class="subtitle">智能对话 · 即时响应 · 贴心服务</text>
       <button class="btn-login" bindtap="wxLogin" loading="{{loading}}">
@@ -29,22 +29,22 @@
 
   <!-- 功能入口 -->
   <view class="features">
-    <view class="feature-item" bindtap="goToChat">
+    <view class="feature-item" bindtap="goToChat" data-scene="general">
       <view class="feature-icon chat-icon">💬</view>
       <text class="feature-name">智能对话</text>
       <text class="feature-desc">7×24小时在线解答</text>
     </view>
-    <view class="feature-item">
+    <view class="feature-item" bindtap="goToChat" data-scene="ordering">
       <view class="feature-icon order-icon">📦</view>
       <text class="feature-name">订单查询</text>
       <text class="feature-desc">实时跟踪物流状态</text>
     </view>
-    <view class="feature-item">
+    <view class="feature-item" bindtap="goToChat" data-scene="after_sales">
       <view class="feature-icon service-icon">🎧</view>
       <text class="feature-name">售后服务</text>
       <text class="feature-desc">专业客服为您服务</text>
     </view>
-    <view class="feature-item">
+    <view class="feature-item" bindtap="goToChat" data-scene="technical">
       <view class="feature-icon tech-icon">🔧</view>
       <text class="feature-name">技术支持</text>
       <text class="feature-desc">技术难题快速解决</text>

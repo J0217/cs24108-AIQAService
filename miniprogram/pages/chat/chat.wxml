@@ -10,7 +10,7 @@
       </view>
     </view>
     <view class="header-right">
-      <image class="help-icon" src="/static/icons/help.png" mode="aspectFit"></image>
+      <view class="help-icon">❓</view>
     </view>
   </view>
 
@@ -45,10 +45,10 @@
     scroll-into-view="{{scrollToView}}"
     scroll-with-animation
   >
-    <view class="message-wrapper" wx:for="{{messages}}" wx:key="id">
+    <view class="message-wrapper" id="msg-{{item.id}}" wx:for="{{messages}}" wx:key="id">
       <!-- 用户消息 -->
       <view class="message-item user-message" wx:if="{{item.role === 'user'}}">
-        <image class="avatar" src="{{userInfo.avatar || '/static/default-avatar.png'}}" mode="aspectFill"></image>
+        <view class="avatar user-avatar">👤</view>
         <view class="message-bubble user-bubble">
           <text class="message-content">{{item.content}}</text>
         </view>
@@ -59,8 +59,9 @@
         <view class="message-bubble ai-bubble">
           <view class="ai-avatar">🤖</view>
           <view class="message-content">{{item.content}}</view>
-          <view class="message-meta" wx:if="{{item.confidence}}">
-            <text class="confidence">✓ 置信度: {{item.confidence * 100 | toPercent}}</text>
+          <view class="message-meta">
+            <text class="quick-reply-tag" wx:if="{{item.is_quick_reply}}">智能模板</text>
+            <text class="confidence" wx:if="{{item.confidencePercent}}">✓ 置信度 {{item.confidencePercent}}%</text>
           </view>
         </view>
       </view>
@@ -87,13 +88,16 @@
   </scroll-view>
 
   <!-- 快捷问题 -->
-  <view class="quick-questions" wx:if="{{messages.length === 0}}">
+  <view class="quick-questions" wx:if="{{messages.length === 0 && quickQuestions.length > 0}}">
     <text class="quick-title">热门问题</text>
     <view class="quick-list">
-      <view class="quick-item" bindtap="handleQuickQuestion" data-question="如何查询订单？">如何查询订单？</view>
-      <view class="quick-item" bindtap="handleQuickQuestion" data-question="退换货政策">退换货政策</view>
-      <view class="quick-item" bindtap="handleQuickQuestion" data-question="联系客服">联系客服</view>
-      <view class="quick-item" bindtap="handleQuickQuestion" data-question="产品使用问题">产品使用问题</view>
+      <view
+        class="quick-item"
+        wx:for="{{quickQuestions}}"
+        wx:key="*this"
+        bindtap="handleQuickQuestion"
+        data-question="{{item}}"
+      >{{item}}</view>
     </view>
   </view>
 
@@ -110,7 +114,7 @@
         confirm-type="send"
         maxlength="500"
       />
-      <button class="send-btn" bindtap="handleSend" loading="{{isSending}}" disabled="{{!inputValue.trim() || isSending}}">
+      <button class="send-btn" bindtap="handleSend" loading="{{isSending}}" disabled="{{!canSend}}">
         发送
       </button>
     </view>

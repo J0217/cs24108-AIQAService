@@ -27,3 +27,11 @@ miniprogram/project.private.config.json
 # OS
 Thumbs.db
 .DS_Store
+
+# Local documents (keep local only, do not commit)
+*.docx
+
+# Local tool artifacts
+.workbuddy/
+.screenshots/
+.report_pass1.pdf

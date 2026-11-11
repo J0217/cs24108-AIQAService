@@ -55,6 +55,9 @@
 .help-icon {
   width: 40rpx;
   height: 40rpx;
+  font-size: 30rpx;
+  line-height: 40rpx;
+  text-align: center;
   opacity: 0.6;
 }
 
@@ -167,6 +170,14 @@
   margin: 0 16rpx;
 }
 
+.user-avatar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #e3f2fd;
+  font-size: 36rpx;
+}
+
 .message-bubble {
   max-width: 70%;
   padding: 24rpx 28rpx;
@@ -204,6 +215,16 @@
   margin-top: 12rpx;
   display: flex;
   justify-content: flex-end;
+  align-items: center;
+  gap: 12rpx;
+}
+
+.quick-reply-tag {
+  font-size: 20rpx;
+  color: #667eea;
+  background: #eef0ff;
+  padding: 4rpx 12rpx;
+  border-radius: 8rpx;
 }
 
 .confidence {

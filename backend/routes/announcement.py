@@ -96,7 +96,9 @@ def list_unread_announcements():
         UserAnnouncement.user_id == user.id, UserAnnouncement.is_read == 1
     )]
 
-    unread = [a.to_dict() for a in query.where(~Announcement.id.in_(read_ids))]
+    if read_ids:
+        query = query.where(~Announcement.id.in_(read_ids))
+    unread = [a.to_dict() for a in query]
     return success_response(unread, '获取成功')
 
 
@@ -220,10 +222,17 @@ def get_unread_count():
     if err:
         return err
 
-    read_count = UserAnnouncement.select().where(
+    now = utcnow()
+    active = Announcement.select().where(
+        Announcement.status == 1,
+        (Announcement.start_time.is_null(True)) | (Announcement.start_time <= now),
+        (Announcement.end_time.is_null(True)) | (Announcement.end_time >= now)
+    )
+    read_ids = [r.announcement_id for r in UserAnnouncement.select().where(
         UserAnnouncement.user_id == user.id, UserAnnouncement.is_read == 1
-    ).count()
-    total_count = Announcement.select().where(Announcement.status == 1).count()
-    unread_count = max(0, total_count - read_count)
+    )]
+    if read_ids:
+        active = active.where(~Announcement.id.in_(read_ids))
 
+    unread_count = active.count()
     return success_response({'unread_count': unread_count}, '获取成功')

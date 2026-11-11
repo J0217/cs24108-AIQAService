@@ -23,99 +23,47 @@ Page({
     const token = wx.getStorageSync('token')
     const userInfo = wx.getStorageSync('userInfo')
     if (token && userInfo) {
-      this.setData({
-        isLoggedIn: true,
-        userInfo: userInfo
+      this.setData({ isLoggedIn: true, userInfo })
+    }
+  },
+
+  loadAnnouncements() {
+    app.request('/announcement/list', { page_size: 1 })
+      .then((response) => {
+        const list = (response.data && response.data.list) || []
+        this.setData({ announcementCount: list.length })
       })
-    }
+      .catch((error) => console.error('获取公告失败:', error))
   },
 
-  async loadAnnouncements() {
-    try {
-      const response = await this.request('/announcement/list', { page_size: 1 })
-      if (response && response.data && response.data.list) {
-        this.setData({
-          announcementCount: response.data.list.length
-        })
-      }
-    } catch (error) {
-      console.error('获取公告失败:', error)
-    }
-  },
-
-  async wxLogin() {
+  wxLogin() {
     if (this.data.loading) return
 
     this.setData({ loading: true })
-
-    try {
-      const code = await app.wxLogin()
-
-      const response = await this.request('/auth/wx-login', {
-        code: code
-      }, 'POST')
-
-      if (response && response.data) {
-        const { token, user } = response.data
-
-        wx.setStorageSync('token', token)
-        app.globalData.token = token
-        app.globalData.userInfo = user
-
-        this.setData({
-          isLoggedIn: true,
-          userInfo: user
-        })
-
-        wx.showToast({
-          title: '登录成功',
-          icon: 'success'
-        })
-      }
-    } catch (error) {
-      console.error('登录失败:', error)
-      wx.showToast({
-        title: '登录失败，请重试',
-        icon: 'none'
+    app.ensureLogin()
+      .then(() => {
+        const userInfo = wx.getStorageSync('userInfo') || {}
+        this.setData({ isLoggedIn: true, userInfo })
+        wx.showToast({ title: '登录成功', icon: 'success' })
       })
-    } finally {
-      this.setData({ loading: false })
+      .catch((error) => {
+        console.error('登录失败:', error)
+        wx.showToast({ title: '登录失败，请重试', icon: 'none' })
+      })
+      .then(() => this.setData({ loading: false }))
+  },
+
+  // 进入对话页，支持携带场景与指定问题
+  goToChat(e) {
+    const dataset = (e && e.currentTarget && e.currentTarget.dataset) || {}
+    const params = []
+    if (dataset.scene) {
+      params.push('scene=' + encodeURIComponent(dataset.scene))
     }
-  },
-
-  goToChat() {
-    wx.navigateTo({
-      url: '/pages/chat/chat'
-    })
-  },
-
-  // 简易请求封装
-  request(url, data = {}, method = 'GET') {
-    return new Promise((resolve, reject) => {
-      const token = wx.getStorageSync('token')
-      const baseUrl = app.globalData.baseUrl || 'http://localhost:5000/api'
-
-      wx.request({
-        url: baseUrl + url,
-        data: data,
-        method: method,
-        header: {
-          'Content-Type': 'application/json',
-          'Authorization': token ? `Bearer ${token}` : ''
-        },
-        success: (res) => {
-          if (res.data && res.data.code === 200) {
-            resolve(res.data)
-          } else {
-            const error = new Error(res.data?.message || '请求失败')
-            error.statusCode = res.statusCode
-            reject(error)
-          }
-        },
-        fail: (err) => {
-          reject(err)
-        }
-      })
-    })
+    if (dataset.question) {
+      params.push('question=' + encodeURIComponent(dataset.question))
+    }
+    const url = '/pages/chat/chat' + (params.length ? '?' + params.join('&') : '')
+    wx.navigateTo({ url })
   }
 })
