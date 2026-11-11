@@ -2,67 +2,59 @@
 """
 公告路由 - 公告发布、推送、阅读状态管理
 """
-from flask import Blueprint, request, current_app
-from datetime import datetime, timezone
 import json
-
-from ..models import db, User, Announcement, UserAnnouncement
-from ..utils.response import success_response, error_response
 import logging
+from datetime import datetime
+
+from flask import Blueprint, request, current_app
+
+from ..models import Announcement, UserAnnouncement
+from ..utils.auth import admin_required, get_current_user, utcnow
+from ..utils.response import success_response, error_response
 
 bp = Blueprint('announcement', __name__, url_prefix='/api/announcement')
 logger = logging.getLogger(__name__)
 
 
-def utcnow():
-    return datetime.now(timezone.utc)
-
-
-def get_current_user():
-    """获取当前登录用户"""
-    token = request.headers.get('Authorization', '').replace('Bearer ', '')
-    if not token:
-        return None, error_response('未提供认证Token', 401)
-
-    import jwt
+def _parse_dt(value, field):
+    """安全解析 ISO 时间字符串，返回 (datetime|None, error)"""
+    if value in (None, ''):
+        return None, None
     try:
-        payload = jwt.decode(token, current_app.config.get('JWT_SECRET_KEY'), algorithms=['HS256'])
-        user = User.get_or_none((User.id == payload['user_id']) & (User.status == 1))
-        if not user:
-            return None, error_response('用户不存在或已被禁用', 401)
-        return user, None
-    except Exception:
-        return None, error_response('Token无效或已过期', 401)
+        return datetime.fromisoformat(str(value)), None
+    except (TypeError, ValueError):
+        return None, error_response(f'{field} 格式应为 ISO8601（如 2026-11-11T09:00:00）', 400)
 
 
-def admin_required(f):
-    """管理员权限装饰器（内联实现）"""
-    from functools import wraps
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        user, err = get_current_user()
-        if err:
-            return err
-        if user.role != 'admin':
-            return error_response('无权限操作', 403)
-        return f(user, *args, **kwargs)
-    return decorated
-
-
-@bp.route('/list', methods=['GET'])
-def list_announcements():
-    """获取公告列表（公开）"""
-    page = request.args.get('page', 1, type=int)
-    page_size = request.args.get('page_size', current_app.config.get('PAGE_SIZE'), type=int)
-    ann_type = request.args.get('type', '')
-
+def _active_query(user=None):
+    """当前生效的公告查询（状态 + 时间窗 + 定向范围）"""
     now = utcnow()
     query = Announcement.select().where(
         Announcement.status == 1,
         (Announcement.start_time.is_null(True)) | (Announcement.start_time <= now),
         (Announcement.end_time.is_null(True)) | (Announcement.end_time >= now)
     )
+    # 定向推送：只展示 all 或包含当前用户 ID/角色的公告
+    target_cond = Announcement.target_users.contains('"all"')
+    if user is not None:
+        target_cond = (target_cond
+                       | Announcement.target_users.contains(f'"{user.id}"')
+                       | Announcement.target_users.contains(f'"{user.role}"'))
+    return query.where(target_cond)
 
+
+@bp.route('/list', methods=['GET'])
+def list_announcements():
+    """获取公告列表（公开，未登录只返回面向全体用户的公告）"""
+    page = max(1, request.args.get('page', 1, type=int))
+    page_size = min(request.args.get('page_size', current_app.config.get('PAGE_SIZE'), type=int) or 20, 100)
+    ann_type = request.args.get('type', '')
+
+    user = None
+    if request.headers.get('Authorization'):
+        user, _ = get_current_user()
+
+    query = _active_query(user)
     if ann_type:
         query = query.where(Announcement.type == ann_type)
 
@@ -85,19 +77,13 @@ def list_unread_announcements():
     if err:
         return err
 
-    now = utcnow()
-    query = Announcement.select().where(
-        Announcement.status == 1,
-        (Announcement.start_time.is_null(True)) | (Announcement.start_time <= now),
-        (Announcement.end_time.is_null(True)) | (Announcement.end_time >= now)
-    ).order_by(Announcement.priority.desc(), Announcement.created_at.desc())
-
+    query = _active_query(user).order_by(Announcement.priority.desc(), Announcement.created_at.desc())
     read_ids = [r.announcement_id for r in UserAnnouncement.select().where(
         UserAnnouncement.user_id == user.id, UserAnnouncement.is_read == 1
     )]
-
     if read_ids:
         query = query.where(~Announcement.id.in_(read_ids))
+
     unread = [a.to_dict() for a in query]
     return success_response(unread, '获取成功')
 
@@ -105,37 +91,52 @@ def list_unread_announcements():
 @bp.route('/<int:announcement_id>', methods=['GET'])
 def get_announcement(announcement_id):
     """获取公告详情"""
-    announcement = Announcement.get_or_none((Announcement.id == announcement_id) & (Announcement.status == 1))
+    announcement = Announcement.get_or_none(
+        (Announcement.id == announcement_id) & (Announcement.status == 1))
     if not announcement:
         return error_response('公告不存在', 404)
 
+    # 原子自增，避免并发读改写丢失
+    Announcement.update(view_count=Announcement.view_count + 1).where(
+        Announcement.id == announcement_id).execute()
     announcement.view_count += 1
-    announcement.save()
     return success_response(announcement.to_dict(), '获取成功')
 
 
 @bp.route('/', methods=['POST'])
+@bp.route('', methods=['POST'])
 @admin_required
 def create_announcement(user):
     """创建公告（管理员）"""
-    data = request.get_json()
+    data = request.get_json(silent=True)
     if not data:
         return error_response('请求数据为空', 400)
 
-    title = data.get('title', '').strip()
-    content = data.get('content', '').strip()
+    title = (data.get('title') or '').strip()
+    content = (data.get('content') or '').strip()
     if not title or not content:
         return error_response('标题和内容不能为空', 400)
+    if len(title) > 128:
+        return error_response('标题不能超过128字', 400)
+
+    start_time, err = _parse_dt(data.get('start_time'), 'start_time')
+    if err:
+        return err
+    end_time, err = _parse_dt(data.get('end_time'), 'end_time')
+    if err:
+        return err
+    if start_time and end_time and end_time < start_time:
+        return error_response('结束时间不能早于开始时间', 400)
 
     announcement = Announcement.create(
         title=title,
         content=content,
         type=data.get('type', 'notice'),
-        priority=data.get('priority', 0),
+        priority=int(data.get('priority', 0) or 0),
         cover_image=data.get('cover_image', ''),
-        target_users=json.dumps(data.get('target_users', ['all'])),
-        start_time=datetime.fromisoformat(data['start_time']) if data.get('start_time') else None,
-        end_time=datetime.fromisoformat(data['end_time']) if data.get('end_time') else None,
+        target_users=json.dumps(data.get('target_users', ['all']), ensure_ascii=False),
+        start_time=start_time,
+        end_time=end_time,
         status=data.get('status', 1),
         created_by=user.id
     )
@@ -150,26 +151,30 @@ def update_announcement(user, announcement_id):
     if not announcement:
         return error_response('公告不存在', 404)
 
-    data = request.get_json()
+    data = request.get_json(silent=True)
     if not data:
         return error_response('请求数据为空', 400)
 
     if 'title' in data:
-        announcement.title = data['title'].strip()
+        announcement.title = (data['title'] or '').strip()[:128]
     if 'content' in data:
-        announcement.content = data['content'].strip()
+        announcement.content = (data['content'] or '').strip()
     if 'type' in data:
         announcement.type = data['type']
     if 'priority' in data:
-        announcement.priority = data['priority']
+        announcement.priority = int(data['priority'] or 0)
     if 'cover_image' in data:
-        announcement.cover_image = data['cover_image'].strip()
+        announcement.cover_image = (data['cover_image'] or '').strip()
     if 'target_users' in data:
-        announcement.target_users = json.dumps(data['target_users'])
-    if 'start_time' in data and data['start_time']:
-        announcement.start_time = datetime.fromisoformat(data['start_time'])
-    if 'end_time' in data and data['end_time']:
-        announcement.end_time = datetime.fromisoformat(data['end_time'])
+        announcement.target_users = json.dumps(data['target_users'], ensure_ascii=False)
+    if 'start_time' in data:
+        announcement.start_time, err = _parse_dt(data['start_time'], 'start_time')
+        if err:
+            return err
+    if 'end_time' in data:
+        announcement.end_time, err = _parse_dt(data['end_time'], 'end_time')
+        if err:
+            return err
     if 'status' in data:
         announcement.status = data['status']
 
@@ -181,7 +186,7 @@ def update_announcement(user, announcement_id):
 @bp.route('/<int:announcement_id>', methods=['DELETE'])
 @admin_required
 def delete_announcement(user, announcement_id):
-    """删除公告（管理员）"""
+    """删除公告（管理员，软删除）"""
     announcement = Announcement.get_or_none(Announcement.id == announcement_id)
     if not announcement:
         return error_response('公告不存在', 404)
@@ -198,19 +203,20 @@ def mark_as_read(announcement_id):
     if err:
         return err
 
-    record = UserAnnouncement.get_or_none(
-        (UserAnnouncement.user_id == user.id) & (UserAnnouncement.announcement_id == announcement_id)
-    )
-    if record:
-        record.is_read = 1
-        record.read_at = utcnow()
-        record.save()
-    else:
+    if not Announcement.get_or_none(Announcement.id == announcement_id):
+        return error_response('公告不存在', 404)
+
+    now = utcnow()
+    updated = (UserAnnouncement.update(is_read=1, read_at=now)
+               .where((UserAnnouncement.user_id == user.id)
+                      & (UserAnnouncement.announcement_id == announcement_id))
+               .execute())
+    if not updated:
         UserAnnouncement.create(
             user_id=user.id,
             announcement_id=announcement_id,
             is_read=1,
-            read_at=utcnow()
+            read_at=now
         )
     return success_response(None, '标记成功')
 
@@ -222,17 +228,11 @@ def get_unread_count():
     if err:
         return err
 
-    now = utcnow()
-    active = Announcement.select().where(
-        Announcement.status == 1,
-        (Announcement.start_time.is_null(True)) | (Announcement.start_time <= now),
-        (Announcement.end_time.is_null(True)) | (Announcement.end_time >= now)
-    )
+    active = _active_query(user)
     read_ids = [r.announcement_id for r in UserAnnouncement.select().where(
         UserAnnouncement.user_id == user.id, UserAnnouncement.is_read == 1
     )]
     if read_ids:
         active = active.where(~Announcement.id.in_(read_ids))
 
-    unread_count = active.count()
-    return success_response({'unread_count': unread_count}, '获取成功')
+    return success_response({'unread_count': active.count()}, '获取成功')

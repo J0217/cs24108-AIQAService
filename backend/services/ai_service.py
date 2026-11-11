@@ -14,8 +14,11 @@ logger = logging.getLogger(__name__)
 # 快捷回复命中阈值：达到该置信度直接使用模板，无需调用大模型
 QUICK_REPLY_THRESHOLD = 0.75
 
-# 未配置真实 AI Key 时的占位特征
-_PLACEHOLDER_KEYS = ('', 'your-', 'sk-your', 'demo', 'none')
+# 占位 Key 前缀（注意：不能把空字符串放进来，否则任何 Key 都会被判定为占位）
+_PLACEHOLDER_PREFIXES = ('your-', 'sk-your', 'sk-xxx', 'xxx', 'demo', 'none', 'change-me')
+
+# 送入大模型的上下文消息条数上限
+DEFAULT_HISTORY_LIMIT = 10
 
 
 class AIService:
@@ -27,6 +30,7 @@ class AIService:
         self.base_url = base_url or current_app.config.get('AI_API_BASE_URL', 'https://api.openai.com/v1')
         self.model = model or current_app.config.get('AI_MODEL', 'gpt-3.5-turbo')
         self.timeout = current_app.config.get('AI_TIMEOUT', 30)
+        self.history_limit = current_app.config.get('AI_HISTORY_LIMIT', DEFAULT_HISTORY_LIMIT)
         self.quick_replies = self._load_quick_replies()
 
     # ==================== 快捷回复模板 ====================
@@ -79,6 +83,10 @@ class AIService:
             else:
                 confidence = 0.0
 
+            # 同场景模板优先于通用模板（避免通用模板抢答）
+            if confidence and reply.get('scene_type') == scene_type:
+                confidence = min(confidence + 0.05, 0.95)
+
             if confidence > best_confidence:
                 best_confidence = confidence
                 best_answer = reply.get('answer', '')
@@ -104,53 +112,62 @@ class AIService:
                        max_tokens: int = None,
                        temperature: float = None) -> Tuple[str, float, float, int]:
         """
-        生成回复
+        生成回复，策略优先级：
+            1) 场景模板高置信命中（>=0.75）→ 直接返回模板，省 token、响应快
+            2) 已配置大模型 → 调用 AI 生成（模板不再覆盖 AI 结果）
+            3) AI 未配置或调用失败 → 低置信模板兜底
+            4) 全无命中 → 场景默认话术
         :return: (回复内容, 置信度, 响应时间毫秒, 是否命中快捷模板 1/0)
         """
         from flask import current_app
         max_tokens = max_tokens or current_app.config.get('AI_MAX_TOKENS', 2000)
         temperature = current_app.config.get('AI_TEMPERATURE', 0.7) if temperature is None else temperature
         start_time = time.time()
+        history = list(history or [])
+        if len(history) > self.history_limit:
+            history = history[-self.history_limit:]
 
-        # 1. 优先智能匹配场景模板
+        # 1. 场景模板匹配
         template_answer, template_confidence, template_id = self._match_quick_reply(content, scene_type)
+
+        # 1) 高置信模板直接返回
         if template_answer and template_confidence >= QUICK_REPLY_THRESHOLD:
             self._increase_usage(template_id)
             response_time = (time.time() - start_time) * 1000
-            logger.info(f'命中快捷模板(id={template_id})，置信度={template_confidence:.2f}')
+            logger.info('命中快捷模板(id=%s) 置信度=%.2f', template_id, template_confidence)
             return template_answer, template_confidence, response_time, 1
 
-        # 2. 未配置真实 AI Key 时，降级为模板/兜底回复
-        if not self._ai_configured():
+        # 2) 已配置大模型：调用 AI，成功则以其结果为准
+        if self._ai_configured():
+            try:
+                reply, ai_confidence = self._call_ai_api(
+                    content, history, scene_type, max_tokens, temperature)
+                if reply:
+                    response_time = (time.time() - start_time) * 1000
+                    logger.info('大模型回复成功，置信度=%.2f，耗时=%.0fms', ai_confidence, response_time)
+                    return reply, ai_confidence, response_time, 0
+                logger.warning('大模型返回空内容，降级为模板/兜底')
+            except Exception as e:
+                logger.error('AI回复生成失败，降级为模板/兜底: %s', e)
+        else:
             logger.info('未配置有效 AI_API_KEY，使用本地模板兜底')
-            response_time = (time.time() - start_time) * 1000
-            if template_answer:
-                self._increase_usage(template_id)
-                return template_answer, max(template_confidence, 0.6), response_time, 1
-            return self._get_default_reply(scene_type), 0.3, response_time, 0
 
-        # 3. 调用大模型生成
-        try:
-            reply, ai_confidence = self._call_ai_api(
-                content, history, scene_type, max_tokens, temperature)
-            if template_answer:
-                reply = template_answer
-                ai_confidence = max(ai_confidence, template_confidence)
-                self._increase_usage(template_id)
-            response_time = (time.time() - start_time) * 1000
-            return reply, ai_confidence, response_time, 0
-        except Exception as e:
-            logger.error(f'AI回复生成失败: {e}')
-            response_time = (time.time() - start_time) * 1000
-            if template_answer:
-                self._increase_usage(template_id)
-                return template_answer, max(template_confidence, 0.6), response_time, 1
-            return self._get_default_reply(scene_type), 0.3, response_time, 0
+        # 3) 低置信模板兜底
+        response_time = (time.time() - start_time) * 1000
+        if template_answer:
+            self._increase_usage(template_id)
+            return template_answer, max(template_confidence, 0.6), response_time, 1
+
+        # 4) 场景默认话术
+        return self._get_default_reply(scene_type), 0.3, response_time, 0
 
     def _ai_configured(self) -> bool:
-        """判断是否配置了可用的 AI Key"""
-        key = (self.api_key or '').strip().lower()
-        return bool(key) and not key.startswith(_PLACEHOLDER_KEYS)
+        """判断是否配置了可用的大模型 Key（排除空值与占位值）"""
+        key = (self.api_key or '').strip()
+        if len(key) < 8:
+            return False
+        lowered = key.lower()
+        return not any(lowered.startswith(prefix) for prefix in _PLACEHOLDER_PREFIXES)
 
     def _call_ai_api(self, content: str, history: List[dict], scene_type: str,
                      max_tokens: int, temperature: float) -> Tuple[str, float]:
@@ -158,7 +175,7 @@ class AIService:
         system_prompt = self._build_system_prompt(scene_type)
         messages = [{'role': 'system', 'content': system_prompt}]
         if history:
-            messages.extend(history[-10:])  # 仅保留最近10条，控制上下文长度
+            messages.extend(history[-self.history_limit:])  # 控制上下文长度
         messages.append({'role': 'user', 'content': content})
 
         headers = {

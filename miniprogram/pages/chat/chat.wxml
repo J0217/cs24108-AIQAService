@@ -10,7 +10,8 @@
       </view>
     </view>
     <view class="header-right">
-      <view class="help-icon">❓</view>
+      <view class="header-icon" bindtap="toggleHistory">🗂</view>
+      <view class="header-icon" bindtap="toggleHelp">❓</view>
     </view>
   </view>
 
@@ -34,6 +35,54 @@
           <text class="scene-name">{{scene.name}}</text>
         </view>
       </view>
+      <text class="picker-tip">切换场景会开启一段新的会话，历史对话仍会保留</text>
+    </view>
+  </view>
+
+  <!-- 历史会话抽屉 -->
+  <view class="history-drawer" wx:if="{{showHistory}}">
+    <view class="picker-mask" bindtap="toggleHistory"></view>
+    <view class="history-panel">
+      <view class="history-header">
+        <text class="history-title">历史会话</text>
+        <text class="close-btn" bindtap="toggleHistory">✕</text>
+      </view>
+      <view class="new-chat-btn" bindtap="startNewConversation">＋ 新建对话</view>
+      <scroll-view class="history-list" scroll-y>
+        <view
+          class="history-item {{item.active ? 'active' : ''}}"
+          wx:for="{{conversations}}"
+          wx:key="id"
+          bindtap="selectConversation"
+          data-id="{{item.id}}"
+        >
+          <view class="history-item-main">
+            <text class="history-item-icon">{{item.sceneIcon}}</text>
+            <view class="history-item-text">
+              <text class="history-item-title">{{item.title}}</text>
+              <text class="history-item-meta">{{item.sceneName}} · {{item.message_count}} 条提问</text>
+            </view>
+          </view>
+          <text class="history-item-del" catchtap="deleteConversation" data-id="{{item.id}}">删除</text>
+        </view>
+        <view class="history-empty" wx:if="{{conversations.length === 0}}">
+          <text>暂无历史会话</text>
+        </view>
+      </scroll-view>
+    </view>
+  </view>
+
+  <!-- 帮助弹窗 -->
+  <view class="help-modal" wx:if="{{showHelp}}">
+    <view class="picker-mask" bindtap="toggleHelp"></view>
+    <view class="help-card">
+      <text class="help-title">使用帮助</text>
+      <view class="help-line">1. 顶部场景标签可切换业务场景，切换后开启新会话</view>
+      <view class="help-line">2. 右上角 🗂 可查看和继续历史对话</view>
+      <view class="help-line">3. 回复气泡上的「智能模板 / 置信度」表示回答来源与可信度</view>
+      <view class="help-line">4. 置信度较低时可点击「重新生成」或联系人工客服</view>
+      <view class="help-phone" bindtap="copyServicePhone">客服热线 400-800-1234（9:00-21:00）· 点击复制</view>
+      <view class="help-close" bindtap="toggleHelp">知道了</view>
     </view>
   </view>
 
@@ -99,6 +148,12 @@
         data-question="{{item}}"
       >{{item}}</view>
     </view>
+  </view>
+
+  <!-- 发送失败提示 -->
+  <view class="failed-tip" wx:if="{{failedContent}}">
+    <text class="failed-text">上一条消息发送失败</text>
+    <text class="failed-retry" bindtap="retrySend">重新发送</text>
   </view>
 
   <!-- 输入区 -->

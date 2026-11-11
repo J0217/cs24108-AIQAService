@@ -75,10 +75,12 @@ class Conversation(BaseMixin):
         table_name = 'conversations'
         database = db
 
-    def to_dict(self):
-        msg_count = Message.select().where(
-            (Message.conversation_id == self.id) & (Message.role == 'user')
-        ).count()
+    def to_dict(self, message_count=None):
+        # 允许调用方传入已聚合的消息数，避免列表接口逐条 count（N+1）
+        if message_count is None:
+            message_count = Message.select().where(
+                (Message.conversation_id == self.id) & (Message.role == 'user')
+            ).count()
         return {
             'id': self.id,
             'user_id': _pk(self.user_id),
@@ -86,7 +88,7 @@ class Conversation(BaseMixin):
             'title': self.title,
             'scene_type': self.scene_type,
             'status': self.status,
-            'message_count': msg_count,
+            'message_count': message_count,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None
         }

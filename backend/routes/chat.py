@@ -2,50 +2,37 @@
 """
 对话路由 - 小程序对话接口、消息收发、AI回复生成
 """
-from flask import Blueprint, request, current_app
-from datetime import datetime, timezone
+import logging
 import time
 import uuid
 
-from ..models import db, User, Conversation, Message, QuickReply
+from flask import Blueprint, request, current_app
+from peewee import fn
+
+from ..models import Conversation, Message, QuickReply
 from ..services.ai_service import AIService
+from ..utils.auth import get_current_user, utcnow
 from ..utils.response import success_response, error_response
-import logging
 
 bp = Blueprint('chat', __name__, url_prefix='/api/chat')
 logger = logging.getLogger(__name__)
 
 
-def utcnow():
-    return datetime.now(timezone.utc)
-
-
-def get_current_user():
-    """获取当前登录用户"""
-    token = request.headers.get('Authorization', '').replace('Bearer ', '')
-    if not token:
-        return None, error_response('未提供认证Token', 401)
-
-    import jwt
-    try:
-        payload = jwt.decode(token, current_app.config.get('JWT_SECRET_KEY'), algorithms=['HS256'])
-        user = User.get_or_none((User.id == payload['user_id']) & (User.status == 1))
-        if not user:
-            return None, error_response('用户不存在或已被禁用', 401)
-        return user, None
-    except Exception:
-        return None, error_response('Token无效或已过期', 401)
+def _valid_scene(scene_type):
+    """场景白名单校验，非法值回退 general"""
+    scenes = current_app.config.get('SCENE_TYPES', ())
+    return scene_type if scene_type in scenes else 'general'
 
 
 @bp.route('/conversations', methods=['GET'])
 def list_conversations():
-    """获取当前用户的对话列表"""
+    """获取当前用户的对话列表（消息数一次聚合查询，避免 N+1）"""
     user, err = get_current_user()
     if err:
         return err
 
-    page = request.args.get('page', 1, type=int)
-    page_size = request.args.get('page_size', current_app.config.get('PAGE_SIZE'), type=int)
+    page = max(1, request.args.get('page', 1, type=int))
+    page_size = min(request.args.get('page_size', current_app.config.get('PAGE_SIZE'), type=int) or 20, 100)
     scene_type = request.args.get('scene_type', '')
 
     query = Conversation.select().where(Conversation.user_id == user.id, Conversation.status == 1)
@@ -54,10 +41,20 @@ def list_conversations():
     query = query.order_by(Conversation.updated_at.desc())
 
     total = query.count()
-    conversations = [c.to_dict() for c in query.limit(page_size).offset((page - 1) * page_size)]
+    conversations = list(query.limit(page_size).offset((page - 1) * page_size))
+
+    # 一次性统计本页每个会话的用户消息数
+    counts = {}
+    ids = [c.id for c in conversations]
+    if ids:
+        rows = (Message.select(Message.conversation_id, fn.COUNT(Message.id).alias('cnt'))
+                .where((Message.conversation_id.in_(ids)) & (Message.role == 'user'))
+                .group_by(Message.conversation_id)
+                .tuples())
+        counts = {row[0]: row[1] for row in rows}
 
     return success_response({
-        'list': conversations,
+        'list': [c.to_dict(message_count=counts.get(c.id, 0)) for c in conversations],
         'total': total,
         'page': page,
         'page_size': page_size,
@@ -67,43 +64,53 @@ def list_conversations():
 
 @bp.route('/conversations', methods=['POST'])
 def create_conversation():
-    """创建新对话"""
+    """创建新对话；同场景已存在空会话时直接复用，避免产生大量空会话"""
     user, err = get_current_user()
     if err:
         return err
 
-    data = request.get_json() or {}
-    title = data.get('title', '新对话')
-    scene_type = data.get('scene_type', 'general')
-    session_id = f"session_{uuid.uuid4().hex[:12]}"
+    data = request.get_json(silent=True) or {}
+    title = (data.get('title') or '新对话').strip()[:128]
+    scene_type = _valid_scene(data.get('scene_type', 'general'))
+    reuse_empty = data.get('reuse_empty', True)
+
+    if reuse_empty:
+        empty = (Conversation.select()
+                 .where(Conversation.user_id == user.id,
+                        Conversation.scene_type == scene_type,
+                        Conversation.status == 1)
+                 .order_by(Conversation.updated_at.desc())
+                 .first())
+        if empty and not Message.select().where(Message.conversation_id == empty.id).exists():
+            return success_response(empty.to_dict(message_count=0), '已复用空会话')
 
     conversation = Conversation.create(
         user_id=user.id,
-        session_id=session_id,
+        session_id=f"session_{uuid.uuid4().hex[:12]}",
         title=title,
         scene_type=scene_type,
         status=1
     )
-    return success_response(conversation.to_dict(), '创建成功')
+    return success_response(conversation.to_dict(message_count=0), '创建成功')
 
 
 @bp.route('/conversations/<int:conversation_id>', methods=['PUT'])
 def update_conversation(conversation_id):
-    """更新对话信息（切换场景/修改标题）"""
+    """更新对话信息（修改标题）"""
     user, err = get_current_user()
     if err:
         return err
 
-    conversation = Conversation.get_or_none((Conversation.id == conversation_id) & (Conversation.user_id == user.id))
+    conversation = Conversation.get_or_none(
+        (Conversation.id == conversation_id) & (Conversation.user_id == user.id))
     if not conversation:
         return error_response('对话不存在', 404)
 
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     if data.get('title'):
         conversation.title = data['title'].strip()[:128]
-    scene_type = data.get('scene_type')
-    if scene_type:
-        conversation.scene_type = scene_type
+    if data.get('scene_type'):
+        conversation.scene_type = _valid_scene(data['scene_type'])
     conversation.updated_at = utcnow()
     conversation.save()
     return success_response(conversation.to_dict(), '更新成功')
@@ -116,17 +123,18 @@ def get_conversation(conversation_id):
     if err:
         return err
 
-    conversation = Conversation.get_or_none((Conversation.id == conversation_id) & (Conversation.user_id == user.id))
+    conversation = Conversation.get_or_none(
+        (Conversation.id == conversation_id) & (Conversation.user_id == user.id))
     if not conversation:
         return error_response('对话不存在', 404)
 
-    page = request.args.get('page', 1, type=int)
-    page_size = request.args.get('page_size', 50, type=int)
+    page = max(1, request.args.get('page', 1, type=int))
+    page_size = min(request.args.get('page_size', 50, type=int) or 50, 200)
 
     total = Message.select().where(Message.conversation_id == conversation_id).count()
     messages = [m.to_dict() for m in
                 Message.select().where(Message.conversation_id == conversation_id)
-                .order_by(Message.created_at.asc())
+                .order_by(Message.created_at.asc(), Message.id.asc())
                 .limit(page_size)
                 .offset((page - 1) * page_size)]
 
@@ -141,12 +149,13 @@ def get_conversation(conversation_id):
 
 @bp.route('/conversations/<int:conversation_id>', methods=['DELETE'])
 def delete_conversation(conversation_id):
-    """删除对话"""
+    """删除对话（软删除）"""
     user, err = get_current_user()
     if err:
         return err
 
-    conversation = Conversation.get_or_none((Conversation.id == conversation_id) & (Conversation.user_id == user.id))
+    conversation = Conversation.get_or_none(
+        (Conversation.id == conversation_id) & (Conversation.user_id == user.id))
     if not conversation:
         return error_response('对话不存在', 404)
 
@@ -162,18 +171,19 @@ def send_message(conversation_id):
     if err:
         return err
 
-    conversation = Conversation.get_or_none((Conversation.id == conversation_id) & (Conversation.user_id == user.id))
+    conversation = Conversation.get_or_none(
+        (Conversation.id == conversation_id) & (Conversation.user_id == user.id))
     if not conversation:
         return error_response('对话不存在', 404)
 
-    data = request.get_json()
-    if not data or not data.get('content'):
+    data = request.get_json(silent=True)
+    if not data or not str(data.get('content') or '').strip():
         return error_response('消息内容不能为空', 400)
 
-    content = data['content'].strip()
+    content = str(data['content']).strip()
+    if len(content) > 500:
+        return error_response('单条消息不能超过500字', 400)
     message_type = data.get('message_type', 'text')
-
-    start_time = time.time()
 
     # 记录用户消息
     user_message = Message.create(
@@ -184,13 +194,14 @@ def send_message(conversation_id):
         message_type=message_type
     )
 
-    # 获取对话历史
-    history = [
-        {'role': m.role, 'content': m.content}
-        for m in Message.select().where(Message.conversation_id == conversation_id)
-        .order_by(Message.created_at.asc())
-    ]
-    history = history[:-1]  # 排除刚添加的用户消息
+    # 仅取最近 N 条上下文（数据库层截断）
+    history_limit = current_app.config.get('AI_HISTORY_LIMIT', 10)
+    recent = list(
+        Message.select().where(Message.conversation_id == conversation_id)
+        .order_by(Message.created_at.desc(), Message.id.desc())
+        .limit(history_limit + 1)
+    )
+    history = [{'role': m.role, 'content': m.content} for m in reversed(recent)][:-1]
 
     # 调用AI生成回复
     ai_service = AIService()
@@ -213,8 +224,8 @@ def send_message(conversation_id):
         response_time=response_time
     )
 
-    # 更新对话标题（如果是对话第一条）
-    if conversation.messages.count() <= 2:
+    # 首次提问时用问题作为会话标题
+    if conversation.title in ('新对话', '', None):
         conversation.title = content[:30] + ('...' if len(content) > 30 else '')
     conversation.updated_at = utcnow()
     conversation.save()
@@ -232,7 +243,8 @@ def regenerate_message(conversation_id, message_id):
     if err:
         return err
 
-    conversation = Conversation.get_or_none((Conversation.id == conversation_id) & (Conversation.user_id == user.id))
+    conversation = Conversation.get_or_none(
+        (Conversation.id == conversation_id) & (Conversation.user_id == user.id))
     if not conversation:
         return error_response('对话不存在', 404)
 
@@ -247,18 +259,19 @@ def regenerate_message(conversation_id, message_id):
         Message.conversation_id == conversation_id,
         Message.role == 'user',
         Message.created_at <= message.created_at
-    ).order_by(Message.created_at.desc()).first())
+    ).order_by(Message.created_at.desc(), Message.id.desc()).first())
 
     if not user_msg:
         return error_response('找不到对应的用户消息', 404)
 
-    history = [
-        {'role': m.role, 'content': m.content}
-        for m in Message.select().where(
+    history_limit = current_app.config.get('AI_HISTORY_LIMIT', 10)
+    recent = list(
+        Message.select().where(
             Message.conversation_id == conversation_id,
             Message.created_at < user_msg.created_at
-        ).order_by(Message.created_at.asc())
-    ]
+        ).order_by(Message.created_at.desc(), Message.id.desc()).limit(history_limit)
+    )
+    history = [{'role': m.role, 'content': m.content} for m in reversed(recent)]
 
     ai_service = AIService()
     ai_response, confidence, response_time, is_quick_reply = ai_service.generate_reply(

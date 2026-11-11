@@ -110,11 +110,37 @@ def create_app(config_name=None):
     app.register_blueprint(announcement.bp)
     app.register_blueprint(api.bp)
 
+    # 统一 JSON 错误响应（避免前端拿到 HTML 错误页）
+    register_error_handlers(app)
+
     # 初始化数据库（创建表 + 兼容旧库结构 + 初始化基础数据）
     init_database()
 
     logger.info('AI问答客服平台启动成功!')
     return app
+
+
+def register_error_handlers(app):
+    """所有异常统一返回 {code, message, data, timestamp} 结构，便于小程序解析"""
+    from werkzeug.exceptions import HTTPException
+    from .utils.response import error_response
+
+    @app.errorhandler(HTTPException)
+    def handle_http_error(err):
+        messages = {
+            400: '请求参数有误', 401: '未授权', 403: '无权限访问',
+            404: '接口或资源不存在', 405: '请求方法不被允许',
+            413: '请求体过大', 429: '请求过于频繁，请稍后再试',
+        }
+        message = messages.get(err.code, err.description or '请求失败')
+        if err.code >= 500:
+            logger.error('HTTP %s: %s', err.code, err.description)
+        return error_response(message, err.code)
+
+    @app.errorhandler(Exception)
+    def handle_unexpected_error(err):
+        logger.exception('未捕获异常: %s', err)
+        return error_response('服务器内部错误，请稍后重试', 500)
 
 
 def init_database():

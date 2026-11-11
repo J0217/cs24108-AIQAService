@@ -168,6 +168,7 @@
 .order-icon { background: #fff3e0; }
 .service-icon { background: #e8f5e9; }
 .tech-icon { background: #fce4ec; }
+.notice-icon { background: #ede7f6; }
 
 .feature-name {
   font-size: 28rpx;

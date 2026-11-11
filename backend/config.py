@@ -32,9 +32,19 @@ class BaseConfig:
     AI_MAX_TOKENS = int(os.getenv('AI_MAX_TOKENS', 2000))
     AI_TEMPERATURE = float(os.getenv('AI_TEMPERATURE', 0.7))
     AI_TIMEOUT = int(os.getenv('AI_TIMEOUT', 30))
+    # 送入大模型的上下文消息条数上限
+    AI_HISTORY_LIMIT = int(os.getenv('AI_HISTORY_LIMIT', 10))
 
     # 对外开放 API 的 Key 列表（逗号分隔）
     API_KEYS = os.getenv('API_KEYS', 'demo-api-key')
+
+    # 限流配置（进程内滑动窗口，单位：次/分钟）
+    RATE_LIMIT_ENABLED = os.getenv('RATE_LIMIT_ENABLED', 'true').lower() != 'false'
+    RATE_LIMIT_PER_MINUTE = int(os.getenv('RATE_LIMIT_PER_MINUTE', 60))
+    LOGIN_RATE_LIMIT_PER_MINUTE = int(os.getenv('LOGIN_RATE_LIMIT_PER_MINUTE', 10))
+
+    # 支持的问答场景（用于入参白名单校验）
+    SCENE_TYPES = ('general', 'product', 'after_sales', 'technical', 'ordering')
 
     # 文件上传配置
     UPLOAD_FOLDER = os.getenv('UPLOAD_FOLDER', os.path.join(os.path.dirname(os.path.dirname(__file__)), 'uploads'))

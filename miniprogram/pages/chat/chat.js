@@ -25,13 +25,17 @@ Page({
     isSending: false,
     typing: false,
     showScenePicker: false,
+    showHistory: false,
+    showHelp: false,
     scenes: [],
+    conversations: [],
     currentScene: 'general',
     currentSceneName: '通用问答',
     conversationId: null,
     scrollToView: '',
     userInfo: {},
-    quickQuestions: []
+    quickQuestions: [],
+    failedContent: ''
   },
 
   onLoad(options) {
@@ -74,7 +78,7 @@ Page({
   loadQuickReplies() {
     return app.request('/chat/quick-replies?scene_type=' + this.data.currentScene)
       .then((res) => {
-        const questions = (res.data || []).map((item) => item.question)
+        const questions = (res.data || []).map((item) => item.question).slice(0, 6)
         this.setData({ quickQuestions: questions })
       })
       .catch((err) => console.error('获取快捷问题失败:', err))
@@ -92,14 +96,24 @@ Page({
           })
           return this.loadMessages(list[0].id)
         }
-        return app.request('/chat/conversations', {
-          title: '新对话',
-          scene_type: this.data.currentScene
-        }, 'POST').then((createRes) => {
-          this.setData({ conversationId: createRes.data.id })
-        })
+        return this.createConversation(this.data.currentScene)
       })
       .then(() => this.loadQuickReplies())
+  },
+
+  createConversation(scene) {
+    return app.request('/chat/conversations', {
+      title: '新对话',
+      scene_type: scene || this.data.currentScene,
+      reuse_empty: true
+    }, 'POST').then((res) => {
+      this.setData({
+        conversationId: res.data.id,
+        messages: [],
+        scrollToView: ''
+      })
+      return res.data.id
+    })
   },
 
   loadMessages(conversationId) {
@@ -113,7 +127,7 @@ Page({
 
   findSceneName(type) {
     const scene = this.data.scenes.find((s) => s.type === type)
-    return scene ? scene.name : type
+    return scene ? scene.name : (SCENE_NAMES[type] || type)
   },
 
   formatMessage(message) {
@@ -121,6 +135,81 @@ Page({
       ...message,
       confidencePercent: message.confidence ? Math.round(message.confidence * 100) : null
     }
+  },
+
+  // ==================== 历史会话 ====================
+  toggleHistory() {
+    const next = !this.data.showHistory
+    this.setData({ showHistory: next })
+    if (next) this.loadConversations()
+  },
+
+  loadConversations() {
+    app.request('/chat/conversations?page_size=30')
+      .then((res) => {
+        const list = (res.data.list || []).map((c) => ({
+          ...c,
+          sceneIcon: SCENE_ICONS[c.scene_type] || '💬',
+          sceneName: SCENE_NAMES[c.scene_type] || c.scene_type,
+          active: c.id === this.data.conversationId
+        }))
+        this.setData({ conversations: list })
+      })
+      .catch((err) => console.error('获取历史会话失败:', err))
+  },
+
+  selectConversation(e) {
+    const { id } = e.currentTarget.dataset
+    if (!id) return
+    const target = this.data.conversations.find((c) => c.id === id)
+    this.setData({
+      showHistory: false,
+      conversationId: id,
+      currentScene: target ? target.scene_type : this.data.currentScene,
+      currentSceneName: target ? target.sceneName : this.data.currentSceneName
+    })
+    this.loadMessages(id)
+    this.loadQuickReplies()
+  },
+
+  startNewConversation() {
+    this.setData({ showHistory: false })
+    this.createConversation(this.data.currentScene)
+      .then(() => this.loadQuickReplies())
+      .catch((err) => wx.showToast({ title: err.message || '创建失败', icon: 'none' }))
+  },
+
+  deleteConversation(e) {
+    const { id } = e.currentTarget.dataset
+    wx.showModal({
+      title: '删除会话',
+      content: '删除后该会话将不再显示，确定继续？',
+      success: (res) => {
+        if (!res.confirm) return
+        app.request('/chat/conversations/' + id, {}, 'DELETE')
+          .then(() => {
+            const remain = this.data.conversations.filter((c) => c.id !== id)
+            this.setData({ conversations: remain })
+            if (id === this.data.conversationId) {
+              this.setData({ conversationId: null, messages: [] })
+              return this.createConversation(this.data.currentScene)
+            }
+          })
+          .catch((err) => wx.showToast({ title: err.message || '删除失败', icon: 'none' }))
+      }
+    })
+  },
+
+  // ==================== 帮助 ====================
+  toggleHelp() {
+    this.setData({ showHelp: !this.data.showHelp })
+  },
+
+  copyServicePhone() {
+    wx.setClipboardData({
+      data: '400-800-1234',
+      success: () => wx.showToast({ title: '客服电话已复制', icon: 'none' })
+    })
   },
 
   // ==================== 消息发送 ====================
@@ -145,7 +234,15 @@ Page({
     this.sendText(question)
   },
 
-  sendText(rawContent) {
+  // 发送失败后点击重试
+  retrySend() {
+    const content = this.data.failedContent
+    if (!content) return
+    this.setData({ failedContent: '' })
+    this.sendText(content, true)
+  },
+
+  sendText(rawContent, skipFailedClear) {
     const content = (rawContent || '').trim()
     if (!content || this.data.isSending) return
 
@@ -158,29 +255,29 @@ Page({
       isSending: true,
       typing: true
     })
+    if (skipFailedClear) this.setData({ failedContent: '' })
     this.scrollToBottom('msg-' + tempId)
 
     const conversationId = this.data.conversationId
     const sendRequest = conversationId
       ? this.postMessage(conversationId, content)
-      : app.request('/chat/conversations', {
-        title: content.slice(0, 30),
-        scene_type: this.data.currentScene
-      }, 'POST').then((createRes) => {
-        this.setData({ conversationId: createRes.data.id })
-        return this.postMessage(createRes.data.id, content)
-      })
+      : this.createConversation(this.data.currentScene).then((id) => this.postMessage(id, content))
 
     sendRequest.then((res) => {
       const { user_message, assistant_message } = res.data
       const messages = this.data.messages.filter((m) => m.id !== tempId)
       messages.push(this.formatMessage(user_message), this.formatMessage(assistant_message))
-      this.setData({ messages, isSending: false, typing: false })
+      this.setData({ messages, isSending: false, typing: false, failedContent: '' })
       this.scrollToBottom('msg-' + assistant_message.id)
     }).catch((err) => {
       console.error('发送消息失败:', err)
-      this.setData({ isSending: false, typing: false })
-      wx.showToast({ title: err.message || '发送失败，请重试', icon: 'none' })
+      this.setData({
+        isSending: false,
+        typing: false,
+        failedContent: content,
+        canSend: false
+      })
+      wx.showToast({ title: err.message || '发送失败，可点击消息重试', icon: 'none' })
     })
   },
 
@@ -204,6 +301,7 @@ Page({
     this.switchScene(scene)
   },
 
+  // 切换场景时新建会话，避免改写历史会话的场景归属
   switchScene(scene) {
     if (!scene || scene === this.data.currentScene) return Promise.resolve()
     this.setData({
@@ -211,15 +309,18 @@ Page({
       currentSceneName: this.findSceneName(scene)
     })
 
-    const updateRequest = this.data.conversationId
-      ? app.request(`/chat/conversations/${this.data.conversationId}`, { scene_type: scene }, 'PUT')
-      : Promise.resolve()
-
-    return updateRequest
+    return this.createConversation(scene)
       .then(() => this.loadQuickReplies())
       .then(() => {
         wx.showToast({ title: '已切换到' + this.findSceneName(scene), icon: 'none' })
       })
       .catch((err) => console.error('切换场景失败:', err))
+  },
+
+  onShareAppMessage() {
+    return {
+      title: 'AI智能客服 · 7×24小时在线解答',
+      path: '/pages/index/index'
+    }
   }
 })
