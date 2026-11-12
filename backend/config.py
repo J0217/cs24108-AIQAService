@@ -71,6 +71,9 @@ class ProductionConfig(BaseConfig):
 class TestingConfig(BaseConfig):
     """测试环境配置"""
     TESTING = True
+    # 单测不得依赖 .env 里的真实 Key，也不打外部网络：
+    # 清空后 AI 服务统一走本地模板路径，用例结果与是否有 Key 无关
+    AI_API_KEY = ''
 
 
 # 配置映射

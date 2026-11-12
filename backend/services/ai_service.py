@@ -2,6 +2,8 @@
 """
 AI服务 - 场景智能匹配快捷回复模板 + AI大模型生成回复
 """
+import json
+import os
 import re
 import time
 import logging
@@ -19,6 +21,53 @@ _PLACEHOLDER_PREFIXES = ('your-', 'sk-your', 'sk-xxx', 'xxx', 'demo', 'none', 'c
 
 # 送入大模型的上下文消息条数上限
 DEFAULT_HISTORY_LIMIT = 10
+
+# 可重试的 HTTP 状态：多为服务商并发/配额抖动，退避后再试通常成功
+_RETRYABLE_STATUS = (429, 500, 502, 503, 504)
+
+# ==================== 大模型回复缓存 ====================
+# 作用：同一问题第二次提问不再请求模型接口，从而
+#   1) 规避演示现场的服务商限流（429）与网络抖动；
+#   2) 省 token 费用（模板 -> 缓存 -> 模型 三级成本递减）；
+#   3) 重复问题响应时间从「秒级」降到「毫秒级」。
+# 键为「场景 + 归一化问题文本」，默认 24 小时过期，可落盘到 instance/ 下重启复用。
+_CACHE = {}
+_CACHE_MAX_ENTRIES = 500
+_CACHE_LOADED = False
+_CACHE_FILE = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    'instance', 'ai_reply_cache.json')
+
+
+def _load_cache_from_disk():
+    """启动时把未过期的缓存读回内存（文件不存在或损坏时静默跳过）"""
+    global _CACHE_LOADED
+    if _CACHE_LOADED:
+        return
+    _CACHE_LOADED = True
+    try:
+        with open(_CACHE_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        now = time.time()
+        for key, item in data.items():
+            if isinstance(item, dict) and item.get('expires_at', 0) > now:
+                _CACHE[key] = item
+        if _CACHE:
+            logger.info('已加载大模型回复缓存 %d 条: %s', len(_CACHE), _CACHE_FILE)
+    except (OSError, ValueError):
+        pass
+
+
+def _save_cache_to_disk():
+    """缓存落盘，保证重启后预热结果仍然有效"""
+    try:
+        os.makedirs(os.path.dirname(_CACHE_FILE), exist_ok=True)
+        tmp = _CACHE_FILE + '.tmp'
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(_CACHE, f, ensure_ascii=False)
+        os.replace(tmp, _CACHE_FILE)
+    except OSError as e:
+        logger.warning('回复缓存落盘失败: %s', e)
 
 
 class AIService:
@@ -106,6 +155,50 @@ class AIService:
         except Exception as e:
             logger.warning(f'更新模板使用次数失败: {e}')
 
+    # ==================== 回复缓存 ====================
+    @staticmethod
+    def clear_cache():
+        """清空内存缓存（单元测试与「重置演示数据」时使用）"""
+        global _CACHE_LOADED
+        _CACHE.clear()
+        _CACHE_LOADED = True  # 标记已加载，避免清空后又被磁盘旧数据回填
+
+    def _cache_key(self, scene_type: str, content: str) -> str:
+        return f'{scene_type}|{self._normalize(content)}'
+
+    def _cache_get(self, key: str):
+        """读取未过期的缓存项，命中时自增计数；未命中返回 None"""
+        from flask import current_app
+        if not current_app.config.get('AI_CACHE_ENABLED', True):
+            return None
+        _load_cache_from_disk()
+        item = _CACHE.get(key)
+        if not item:
+            return None
+        if item.get('expires_at', 0) <= time.time():
+            _CACHE.pop(key, None)
+            return None
+        item['hits'] = item.get('hits', 0) + 1
+        return item
+
+    def _cache_set(self, key: str, answer: str, confidence: float):
+        """写入缓存；测试环境不落盘，避免污染 instance/ 目录"""
+        from flask import current_app
+        if not current_app.config.get('AI_CACHE_ENABLED', True):
+            return
+        if len(_CACHE) >= _CACHE_MAX_ENTRIES:
+            now = time.time()
+            for stale in [k for k, v in _CACHE.items() if v.get('expires_at', 0) <= now]:
+                _CACHE.pop(stale, None)
+            if len(_CACHE) >= _CACHE_MAX_ENTRIES:
+                _CACHE.pop(next(iter(_CACHE)), None)  # 仍然超限则淘汰最早的一条
+        ttl = current_app.config.get('AI_CACHE_TTL', 86400)
+        now = time.time()
+        _CACHE[key] = {'answer': answer, 'confidence': confidence,
+                       'created_at': now, 'expires_at': now + ttl, 'hits': 0}
+        if not current_app.config.get('TESTING'):
+            _save_cache_to_disk()
+
     # ==================== 回复生成 ====================
     def generate_reply(self, content: str, history: List[dict] = None,
                        scene_type: str = 'general',
@@ -137,12 +230,20 @@ class AIService:
             logger.info('命中快捷模板(id=%s) 置信度=%.2f', template_id, template_confidence)
             return template_answer, template_confidence, response_time, 1
 
-        # 2) 已配置大模型：调用 AI，成功则以其结果为准
+        # 2) 已配置大模型：先查缓存，未命中再调接口（缓存命中不消耗 token）
         if self._ai_configured():
+            cache_key = self._cache_key(scene_type, content)
+            cached = self._cache_get(cache_key)
+            if cached:
+                response_time = (time.time() - start_time) * 1000
+                logger.info('命中回复缓存（累计 %d 次），跳过模型调用，耗时=%.0fms',
+                            cached.get('hits', 1), response_time)
+                return cached.get('answer', ''), cached.get('confidence', 0.85), response_time, 0
             try:
                 reply, ai_confidence = self._call_ai_api(
                     content, history, scene_type, max_tokens, temperature)
                 if reply:
+                    self._cache_set(cache_key, reply, ai_confidence)
                     response_time = (time.time() - start_time) * 1000
                     logger.info('大模型回复成功，置信度=%.2f，耗时=%.0fms', ai_confidence, response_time)
                     return reply, ai_confidence, response_time, 0
@@ -185,8 +286,24 @@ class AIService:
         payload = {'model': self.model, 'messages': messages,
                    'max_tokens': max_tokens, 'temperature': temperature}
 
-        response = requests.post(f'{self.base_url}/chat/completions',
-                                 headers=headers, json=payload, timeout=self.timeout)
+        endpoint = f'{str(self.base_url).rstrip("/")}/chat/completions'
+        # 429/5xx 多为服务商并发或配额抖动，退避重试两次，避免演示时直接掉到兜底话术
+        response = None
+        for attempt in range(3):
+            response = requests.post(endpoint, headers=headers, json=payload, timeout=self.timeout)
+            if response.status_code not in _RETRYABLE_STATUS or attempt == 2:
+                break
+            wait = 1.5 * (attempt + 1)
+            # 服务商通常会在 Retry-After 里给出建议等待秒数，优先采用（上限 8s，避免拖住演示）
+            retry_after = response.headers.get('Retry-After') if response.headers else None
+            if retry_after:
+                try:
+                    wait = min(float(retry_after), 8.0)
+                except (TypeError, ValueError):
+                    pass
+            logger.warning('大模型接口返回 %s，%.1fs 后重试（第 %d 次）',
+                           response.status_code, wait, attempt + 1)
+            time.sleep(wait)
         response.raise_for_status()
 
         reply = response.json()['choices'][0]['message']['content'].strip()

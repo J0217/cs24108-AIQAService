@@ -13,6 +13,9 @@ venv/
 backend/instance/*.db
 *.sqlite3
 
+# 本地运行产物：SQLite 库、演示回复缓存、AI 模式备份
+instance/
+
 # Uploads
 uploads/*
 
@@ -30,6 +33,9 @@ Thumbs.db
 
 # Local documents (keep local only, do not commit)
 *.docx
+
+# 打包产物
+*.zip
 
 # Local tool artifacts
 .workbuddy/

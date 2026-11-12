@@ -57,11 +57,25 @@ def generate_token(user_id, secret_key):
     return jwt.encode(payload, secret_key, algorithm='HS256')
 
 
+# .env.example 里的占位值（your-wx-appid 等）不能当成真实配置，
+# 否则会去调微信接口并返回 invalid appid，导致开发者工具里登录直接 401
+_WX_PLACEHOLDER_PREFIXES = ('your-', 'your_', 'wx-your', 'xxx', 'none', 'change-me', 'todo', 'test')
+
+
+def _wx_configured(appid, secret):
+    """只有 appid 与 secret 都是真实值时才走微信接口"""
+    for value in (appid, secret):
+        value = (value or '').strip().lower()
+        if not value or value.startswith(_WX_PLACEHOLDER_PREFIXES):
+            return False
+    return True
+
+
 def _request_openid(code):
-    """调用微信 jscode2session 换取 openid；未配置 AppID 时使用开发态 mock"""
+    """调用微信 jscode2session 换取 openid；未配置或仍是占位值时使用开发态 mock"""
     appid = current_app.config.get('WX_APPID', '')
     secret = current_app.config.get('WX_SECRET', '')
-    if not appid or not secret:
+    if not _wx_configured(appid, secret):
         return f"mock_openid_{uuid.uuid4().hex[:16]}"
 
     resp = requests.get(WX_CODE2SESSION_URL, params={

@@ -50,11 +50,15 @@
       "idList": []
     },
     "reportToLogid": false,
-    "userConfirmedReportToLogidSwitch": false
+    "userConfirmedReportToLogidSwitch": false,
+    "localPlugins": false,
+    "disableUseStrict": false,
+    "useCompilerPlugins": false,
+    "condition": false
   },
   "compileType": "miniprogram",
   "libVersion": "3.3.4",
-  "appid": "touristappid",
+  "appid": "wxe783115dd5e9e6db",
   "projectname": "ai-qa-service",
   "condition": {},
   "editorSetting": {
@@ -69,8 +73,5 @@
     "skipExternalNetworkErrors": false,
     "sourcemap": false
   },
-  "staticServerOptions": {
-    "baseURL": "",
-    "servePathMap": {}
-  }
+  "simulatorPluginLibVersion": {}
 }

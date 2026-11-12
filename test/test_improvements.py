@@ -73,6 +73,35 @@ class AIServiceTestCase(_BaseCase):
         response.json.return_value = {'choices': [{'message': {'content': content}}]}
         return response
 
+    def setUp(self):
+        AIService.clear_cache()  # 用例之间不共享回复缓存
+
+    def test_ai_reply_is_cached_and_second_call_skips_model(self):
+        """同一问题第二次提问命中缓存，不再请求模型（规避服务商限流、省 token）"""
+        service = AIService(api_key=REAL_AI_KEY)
+        with mock.patch('backend.services.ai_service.requests.post',
+                        return_value=self._fake_completion('这是模型生成的回答，请提供订单号。')) as mocked:
+            first = service.generate_reply('想咨询一个缓存相关问题', scene_type='general')
+            second = service.generate_reply('想咨询一个缓存相关问题', scene_type='general')
+
+        self.assertEqual(mocked.call_count, 1)
+        self.assertEqual(first[0], second[0])
+        self.assertEqual(second[3], 0)          # 仍是模型答案，不是模板
+        self.assertLessEqual(second[2], first[2])  # 缓存命中不快于首次
+
+    def test_ai_cache_can_be_disabled(self):
+        """AI_CACHE_ENABLED=False 时每次都请求模型"""
+        service = AIService(api_key=REAL_AI_KEY)
+        self.app.config['AI_CACHE_ENABLED'] = False
+        try:
+            with mock.patch('backend.services.ai_service.requests.post',
+                            return_value=self._fake_completion('这是模型生成的回答。')) as mocked:
+                service.generate_reply('关闭缓存后的提问', scene_type='general')
+                service.generate_reply('关闭缓存后的提问', scene_type='general')
+            self.assertEqual(mocked.call_count, 2)
+        finally:
+            self.app.config['AI_CACHE_ENABLED'] = True
+
     def test_ai_answer_not_overridden_by_weak_template(self):
         """弱匹配模板（<0.75）存在时，应以大模型结果为准"""
         service = AIService(api_key=REAL_AI_KEY)
